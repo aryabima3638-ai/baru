@@ -1,0 +1,144 @@
+name: Flutter Build
+run-name: "Build ${{ inputs.job_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "ID job dari bot"
+        required: true
+        type: string
+      target:
+        description: "apk atau web"
+        required: true
+        default: apk
+        type: choice
+        options: [apk, web]
+      mode:
+        description: "release atau debug (khusus apk)"
+        required: true
+        default: release
+        type: choice
+        options: [release, debug]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ inputs.job_id }}
+  cancel-in-progress: true
+
+env:
+  JOB_ID: ${{ inputs.job_id }}
+  TARGET: ${{ inputs.target }}
+  MODE: ${{ inputs.mode }}
+  GH_TOKEN: ${{ github.token }}
+  FLUTTER_SUPPRESS_ANALYTICS: "true"
+  CI: "true"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ inputs.target }} ${{ inputs.mode }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: "🧹 Siapkan runner"
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY/CodeQL" || true
+          mkdir -p "$RUNNER_TEMP/w"
+          : > "$RUNNER_TEMP/w/build.log"
+          echo "LOG=$RUNNER_TEMP/w/build.log" >> "$GITHUB_ENV"
+          df -h / | tail -1
+
+      - name: "📥 Unduh project"
+        run: |
+          {
+            cd "$RUNNER_TEMP/w"
+            gh release download "job-$JOB_ID" --repo "$GITHUB_REPOSITORY" --pattern project.zip --dir .
+            ls -lh project.zip
+          } 2>&1 | tee -a "$LOG"
+
+      - name: "📦 Ekstrak ZIP"
+        run: |
+          {
+            cd "$RUNNER_TEMP/w"
+            mkdir -p src
+            unzip -q -o project.zip -d src || [ $? -eq 1 ]
+            rm -f project.zip
+            PUB=$(find src -maxdepth 5 -name pubspec.yaml -not -path '*/.*' -not -path '*/__MACOSX/*' | awk '{print length, $0}' | sort -n | head -n1 | cut -d' ' -f2-)
+            if [ -z "$PUB" ]; then echo "ERROR: pubspec.yaml tidak ditemukan di dalam ZIP"; exit 1; fi
+            echo "PROJECT_DIR=$(cd "$(dirname "$PUB")" && pwd)" >> "$GITHUB_ENV"
+            echo "Project: $(dirname "$PUB")"
+          } 2>&1 | tee -a "$LOG"
+
+      - name: "☕ Setup Java"
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: "🐦 Setup Flutter"
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: "🧩 Siapkan platform"
+        run: |
+          {
+            cd "$PROJECT_DIR"
+            flutter --version
+            if [ "$TARGET" = "apk" ] && [ ! -d android ]; then flutter create --platforms=android --org com.build.app .; fi
+            if [ "$TARGET" = "web" ] && [ ! -d web ]; then flutter create --platforms=web .; fi
+          } 2>&1 | tee -a "$LOG"
+
+      - name: "📚 Flutter pub get"
+        run: |
+          {
+            cd "$PROJECT_DIR"
+            flutter pub get
+          } 2>&1 | tee -a "$LOG"
+
+      - name: "🔨 Build"
+        run: |
+          {
+            cd "$PROJECT_DIR"
+            if [ "$TARGET" = "web" ]; then
+              flutter build web --release
+            elif [ "$MODE" = "debug" ]; then
+              flutter build apk --debug
+            else
+              flutter build apk --release --no-tree-shake-icons
+            fi
+          } 2>&1 | tee -a "$LOG"
+
+      - name: "📤 Upload hasil"
+        run: |
+          {
+            cd "$PROJECT_DIR"
+            if [ "$TARGET" = "web" ]; then
+              (cd build/web && zip -qr "$RUNNER_TEMP/w/result.zip" .)
+              OUT="$RUNNER_TEMP/w/result.zip"
+            else
+              SRC=$(ls build/app/outputs/flutter-apk/*.apk 2>/dev/null | head -n1 || true)
+              if [ -z "$SRC" ]; then echo "ERROR: APK tidak ditemukan di build/app/outputs/flutter-apk"; exit 1; fi
+              cp "$SRC" "$RUNNER_TEMP/w/result.apk"
+              OUT="$RUNNER_TEMP/w/result.apk"
+            fi
+            if [ ! -s "$OUT" ]; then echo "ERROR: hasil build kosong"; exit 1; fi
+            ls -lh "$OUT"
+            gh release upload "job-$JOB_ID" "$OUT" --repo "$GITHUB_REPOSITORY" --clobber
+          } 2>&1 | tee -a "$LOG"
+
+      - name: "🧾 Upload log"
+        if: always()
+        continue-on-error: true
+        run: |
+          cd "$RUNNER_TEMP/w" 2>/dev/null || exit 0
+          [ -f build.log ] || exit 0
+          tail -n 4000 build.log > log.txt
+          gh release upload "job-$JOB_ID" log.txt --repo "$GITHUB_REPOSITORY" --clobber
