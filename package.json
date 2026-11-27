@@ -1,0 +1,17 @@
+{
+  "name": "flutter-sc-builder",
+  "version": "1.0.0",
+  "description": "Bot Telegram: ZIP project Flutter -> APK / Web lewat GitHub Actions (jalan di panel Pterodactyl)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js && node --check lib/builder.js && node --check lib/github.js && node --check lib/db.js && node --check lib/zip.js && node --check lib/util.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "yauzl": "^3.2.0"
+  }
+}
